@@ -1,10 +1,10 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8" />
   <title>サクラ健康判断AI</title>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.16.0/dist/tf.min.js"></script>
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     body { font-family: sans-serif; background: #f2f2f2; padding: 2em; }
     .container { background: #fff; max-width: 420px; margin: auto; border-radius: 10px; box-shadow: 0 0 10px #ccc; padding: 2em; }
@@ -19,30 +19,81 @@
     .sick { color: #e84c3d; }
     .preview { margin-top: 1em; max-width: 100%; border-radius: 8px; display:block; }
     .model-status { font-size: 0.95em; color: #888; margin-top: 0.5em; text-align: center; }
-    /* ビデオラッパー：枠の位置とサイズはここで固定し、内部のvideoを拡大縮小しても枠は変わらない */
+
+    /* video wrapper: fixed frame; internal video can be transformed without changing frame */
     .video-wrapper {
       width: 100%;
-      aspect-ratio: 1 / 1; /* 正方形枠。必要なら変更 */
+      aspect-ratio: 1 / 1;
       position: relative;
       overflow: hidden;
       border-radius: 8px;
       background: #000;
       margin-top: 1em;
     }
-    /* video はラッパー内で中央に配置し、transformで拡大しても親が溢れを隠す */
-    video {
+    video.main {
       position: absolute;
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%) scale(1);
       transform-origin: center center;
-      /* 動画が枠を覆うように fill */
       min-width: 100%;
       min-height: 100%;
       width: auto;
       height: auto;
       display: none;
+      will-change: transform;
     }
+
+    /* overlay preview shown inside videoWrapper when toggled */
+    .overlay-preview {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: none;
+      z-index: 5;
+      border-radius: 8px;
+      background: #000;
+      cursor: pointer;
+    }
+
+    /* preview thumbnail area */
+    .preview-thumb {
+      margin-top: 0.6em;
+      display: flex;
+      gap: 0.6em;
+      align-items: center;
+    }
+    .preview-thumb img {
+      width: 80px;
+      height: 80px;
+      object-fit: cover;
+      border-radius: 6px;
+      border: 1px solid #ddd;
+      cursor: pointer;
+      display: block;
+    }
+    /* mini simple camera shown in thumbnail area (no controls/zoom) */
+    .mini-camera {
+      width: 80px;
+      height: 80px;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #000;
+      border: 1px solid #ddd;
+      display: none;
+      cursor: pointer;
+    }
+    .mini-camera video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .preview-thumb .txt { color:#666; font-size:0.9em; }
+
     .zoom-control { margin-top: 0.6em; display: none; align-items: center; gap: 0.6em; }
     .zoom-control input[type="range"] { width: 100%; }
     .zoom-value { min-width: 48px; text-align: right; font-size: 0.95em; color: #444; }
@@ -54,10 +105,11 @@
   <div class="container">
     <h1>🌸サクラ健康判断AI🌸</h1>
     <div id="modelStatus" class="model-status"></div>
+
     <form id="sakuraForm">
       <label>サクラの写真をアップロードするか、カメラで撮影してください</label>
 
-      <input type="file" id="imageInput" accept="image/*">
+      <input type="file" id="imageInput" accept="image/*" />
 
       <div class="controls">
         <button type="button" id="toggleCamera">カメラ起動</button>
@@ -65,18 +117,27 @@
         <button type="button" id="captureBtn" disabled>撮影</button>
       </div>
 
-      <!-- ラッパーを追加: この枠は常に同じ位置・サイズを保ち、内部ビデオは拡大しても溢れは隠れる -->
       <div class="video-wrapper" id="videoWrapper">
-        <video id="video" autoplay playsinline></video>
+        <video id="video" class="main" autoplay playsinline></video>
+        <!-- overlay preview that toggles with camera display -->
+        <img id="overlayPreview" class="overlay-preview" alt="撮影画像プレビュー" />
       </div>
 
-      <!-- Zoom control -->
+      <!-- Zoom control (fallback + precise control) -->
       <div id="zoomControl" class="zoom-control">
         <input id="zoomSlider" type="range" min="1" max="1" step="0.1" value="1" />
         <div id="zoomValue" class="zoom-value">1.0x</div>
       </div>
 
-      <img id="preview" class="preview" style="display:none;" alt="プレビュー画像" />
+      <!-- thumbnail preview shown after capture; clicking toggles overlay <-> camera -->
+      <div class="preview-thumb" id="previewThumb" style="display:none;">
+        <img id="preview" alt="プレビュー画像" />
+        <!-- mini simple camera container that will show a tiny live feed (no zoom/pan) -->
+        <div class="mini-camera" id="miniCamContainer" title="ミニカメラ（タップでサムネイル/カメラ切替）">
+          <video id="miniCam" autoplay playsinline muted></video>
+        </div>
+        <div class="txt">撮影済み（タップで確認/カメラ切替）</div>
+      </div>
 
       <button type="submit">AIで判定</button>
     </form>
@@ -86,12 +147,11 @@
   </div>
 
   <script>
-    // モデル関連
+    // --- モデル関連（省略説明は前回と同様） ---
     let model = null;
     let classes = ["健康", "病気"];
     const modelStatus = document.getElementById('modelStatus');
     const modelJsonUrl = "https://teachablemachine.withgoogle.com/models/k3U5df8h9/model.json";
-
     async function loadModelFromUrl(modelUrl) {
       modelStatus.textContent = "モデルを読み込み中...";
       try {
@@ -106,9 +166,11 @@
     }
     loadModelFromUrl(modelJsonUrl);
 
-    // DOM
+    // --- DOM ---
     const imageInput = document.getElementById('imageInput');
     const preview = document.getElementById('preview');
+    const previewThumb = document.getElementById('previewThumb');
+    const overlayPreview = document.getElementById('overlayPreview');
     const video = document.getElementById('video');
     const videoWrapper = document.getElementById('videoWrapper');
     const toggleCameraBtn = document.getElementById('toggleCamera');
@@ -118,50 +180,82 @@
     const zoomSlider = document.getElementById('zoomSlider');
     const zoomValue = document.getElementById('zoomValue');
 
-    // state
+    const miniCamContainer = document.getElementById('miniCamContainer');
+    const miniCam = document.getElementById('miniCam');
+
+    // --- 状態 ---
     let inputImage = null;
     let stream = null;
     let isCameraOn = false;
-    let currentFacingMode = "environment"; // "environment" or "user"
+    let currentFacingMode = "environment";
     let hardwareZoomSupported = false;
     let hardwareZoomRange = {min:1, max:1, step:0.1};
-    let zoomFactor = 1; // 現在のズーム値（スライダー操作で更新）
+    let zoomFactor = 1;
+    let panX = 0, panY = 0;
+    let wrapperRect = null;
 
-    // ファイル入力
+    // Two allowed states:
+    // MAIN_VIEW: big camera (video shown) + small static thumbnail (preview shown, miniCam hidden)
+    // OVERLAY_VIEW: big static image (overlayPreview visible) + small live miniCam (miniCamContainer shown, preview hidden)
+    let viewState = 'MAIN_VIEW'; // 'MAIN_VIEW' or 'OVERLAY_VIEW'
+
+    // --- Helper functions to enforce strict two-state toggle ---
+    function setMainView() {
+      // show main camera, show static thumbnail if exists, hide overlay and miniCam
+      viewState = 'MAIN_VIEW';
+      overlayPreview.style.display = 'none';
+      if (isCameraOn) video.style.display = 'block';
+      hideMiniCam(false); // hide miniCam but keep static thumbnail visible if present
+      if (preview.src) {
+        previewThumb.style.display = 'flex';
+        preview.style.display = 'block';
+      }
+    }
+
+    function setOverlayView() {
+      // show big static image overlay and show miniCam in thumbnail area, hide main video
+      if (!overlayPreview.src) return; // nothing to show
+      viewState = 'OVERLAY_VIEW';
+      overlayPreview.style.display = 'block';
+      // hide main video visually but do not stop the stream
+      video.style.display = 'none';
+      // show miniCam and hide static thumbnail image
+      showMiniCam();
+    }
+
+    // --- File input: show thumbnail but keep state consistent ---
     imageInput.addEventListener('change', function() {
       if (this.files && this.files[0]) {
         const fr = new FileReader();
         fr.onload = function(e) {
           preview.src = e.target.result;
-          preview.style.display = 'block';
-          video.style.display = 'none';
+          overlayPreview.src = e.target.result;
+          previewThumb.style.display = 'flex';
+          // after a new static image is loaded, default to MAIN_VIEW
+          setMainView();
           inputImage = new Image();
           inputImage.crossOrigin = "anonymous";
           inputImage.src = e.target.result;
         };
         fr.readAsDataURL(this.files[0]);
       } else {
-        preview.style.display = 'none';
+        previewThumb.style.display = 'none';
+        overlayPreview.style.display = 'none';
         inputImage = null;
       }
     });
 
-    // カメラ起動/停止トグル
+    // --- Camera controls (start/stop/switch/capture) ---
     toggleCameraBtn.addEventListener('click', async () => {
       if (isCameraOn) {
         stopCamera();
       } else {
-        try {
-          await startCamera();
-        } catch (err) {
-          console.error(err);
-          alert('カメラを起動できませんでした。許可の確認や別のブラウザで再試行してください。');
-        }
+        try { await startCamera(); } catch (err) { console.error(err); alert('カメラ起動エラー'); }
       }
     });
 
     async function startCamera() {
-      stopCamera(); // 既存があれば停止
+      stopCamera();
       const tryConstraints = [
         { video: { facingMode: { exact: currentFacingMode } }, audio: false },
         { video: { facingMode: currentFacingMode }, audio: false },
@@ -173,24 +267,26 @@
           stream = await navigator.mediaDevices.getUserMedia(c);
           got = true;
           break;
-        } catch (e) {
-          // 次へ
-        }
+        } catch (e) {}
       }
       if (!got || !stream) throw new Error('カメラストリーム取得失敗');
 
       video.srcObject = stream;
       video.style.display = 'block';
-      preview.style.display = 'none';
+      previewThumb.style.display = preview.src ? 'flex' : 'none';
       captureBtn.disabled = false;
       switchCameraBtn.disabled = false;
       toggleCameraBtn.textContent = "カメラ停止";
       isCameraOn = true;
+      videoWrapper.style.touchAction = 'none';
 
-      // ズーム対応チェック
+      // reset zoom/pan
+      zoomFactor = 1; panX = 0; panY = 0; applyVideoTransform();
+      overlayPreview.style.display = 'none';
+
+      // capabilities check for zoom (same as before)
       const track = stream.getVideoTracks()[0];
       hardwareZoomSupported = false;
-      zoomFactor = 1;
       try {
         const caps = track.getCapabilities ? track.getCapabilities() : {};
         const settings = track.getSettings ? track.getSettings() : {};
@@ -202,26 +298,24 @@
           const initialZoom = settings.zoom || hardwareZoomRange.min || 1;
           zoomFactor = clamp(initialZoom, hardwareZoomRange.min, hardwareZoomRange.max);
           setupZoomSlider(hardwareZoomRange.min, hardwareZoomRange.max, hardwareZoomRange.step, zoomFactor);
-          // ハードウェアズーム対応なら見た目は通常スケール(1)にしておく（実際のフレームはtrackが拡大する）
-          video.style.transform = 'translate(-50%, -50%) scale(1)';
+          video.style.transform = `translate(-50%,-50%) scale(1)`;
         } else {
-          // ハードウェアズーム非対応の場合はソフトウェアズームのスライダーを出す
           hardwareZoomSupported = false;
           setupZoomSlider(1, 3, 0.1, 1);
-          // 初期は scale(1)
-          video.style.transform = 'translate(-50%, -50%) scale(1)';
+          video.style.transform = `translate(-50%,-50%) scale(1)`;
         }
       } catch (err) {
         hardwareZoomSupported = false;
         setupZoomSlider(1, 3, 0.1, 1);
-        video.style.transform = 'translate(-50%, -50%) scale(1)';
+        video.style.transform = `translate(-50%,-50%) scale(1)`;
       }
+
+      // ensure state is MAIN_VIEW when camera starts
+      setMainView();
     }
 
     function stopCamera() {
-      if (stream) {
-        stream.getTracks().forEach(t => t.stop());
-      }
+      if (stream) stream.getTracks().forEach(t => t.stop());
       stream = null;
       video.srcObject = null;
       video.style.display = 'none';
@@ -230,56 +324,115 @@
       toggleCameraBtn.textContent = "カメラ起動";
       isCameraOn = false;
       hideZoomControl();
-      // reset transform
-      video.style.transform = 'translate(-50%, -50%) scale(1)';
+      zoomFactor = 1; panX = 0; panY = 0; applyVideoTransform();
+      videoWrapper.style.touchAction = '';
+      // when camera off, go to MAIN_VIEW visually (overlay hidden, no miniCam)
+      setMainView();
     }
 
-    // カメラ切替
     switchCameraBtn.addEventListener('click', async () => {
       switchCameraBtn.disabled = true;
       currentFacingMode = (currentFacingMode === 'environment') ? 'user' : 'environment';
-      try {
-        await startCamera();
-      } catch (err) {
+      try { await startCamera(); } catch (err) {
         currentFacingMode = (currentFacingMode === 'environment') ? 'user' : 'environment';
         try { await startCamera(); } catch (_) {}
-        alert('カメラの切替に失敗しました。デバイスが対応していない可能性があります。');
-        console.error(err);
-      } finally {
-        switchCameraBtn.disabled = false;
-      }
+        alert('カメラ切替に失敗しました');
+      } finally { switchCameraBtn.disabled = false; }
     });
 
-    // 撮影（ズームは zoomFactor に基づいて中央クロップして反映）
+    // capture: keep camera running and remain in MAIN_VIEW (big camera + small static thumb)
     captureBtn.addEventListener('click', () => {
       if (!stream) return;
-      const width = video.videoWidth;
-      const height = video.videoHeight;
-      if (!width || !height) return;
-
+      const W = video.videoWidth; const H = video.videoHeight;
+      if (!W || !H) return;
+      wrapperRect = videoWrapper.getBoundingClientRect();
+      const wrapperW = Math.round(wrapperRect.width);
+      const wrapperH = Math.round(wrapperRect.height);
+      const scaleToFill = Math.max(wrapperW / W, wrapperH / H);
       const factor = zoomFactor || 1;
-      const cropW = Math.round(width / factor);
-      const cropH = Math.round(height / factor);
-      const sx = Math.max(0, Math.floor((width - cropW) / 2));
-      const sy = Math.max(0, Math.floor((height - cropH) / 2));
-
+      const cropWsrc = Math.round(wrapperW / (scaleToFill * factor));
+      const cropHsrc = Math.round(wrapperH / (scaleToFill * factor));
+      const centerSourceX = W / 2 - (panX / (scaleToFill * factor));
+      const centerSourceY = H / 2 - (panY / (scaleToFill * factor));
+      let sx = Math.round(centerSourceX - cropWsrc / 2);
+      let sy = Math.round(centerSourceY - cropHsrc / 2);
+      if (sx < 0) sx = 0;
+      if (sy < 0) sy = 0;
+      if (sx + cropWsrc > W) sx = Math.max(0, W - cropWsrc);
+      if (sy + cropHsrc > H) sy = Math.max(0, H - cropHsrc);
       const canvas = document.createElement('canvas');
-      const size = Math.min(cropW, cropH);
-      canvas.width = size;
-      canvas.height = size;
+      const size = Math.min(cropWsrc, cropHsrc);
+      canvas.width = size; canvas.height = size;
       const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
-
+      try { ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size); }
+      catch (err) { console.warn('drawImage failed', err); ctx.drawImage(video, 0, 0, canvas.width, canvas.height); }
       const dataUrl = canvas.toDataURL('image/png');
+
+      // Set both static preview and overlay source
       preview.src = dataUrl;
-      preview.style.display = 'block';
-      inputImage = new Image();
-      inputImage.crossOrigin = "anonymous";
-      inputImage.src = dataUrl;
-      video.style.display = 'none';
+      overlayPreview.src = dataUrl;
+      previewThumb.style.display = 'flex';
+      inputImage = new Image(); inputImage.crossOrigin = "anonymous"; inputImage.src = dataUrl;
+
+      // IMPORTANT: after capture we MUST stay in MAIN_VIEW (big camera + small static thumbnail)
+      setMainView();
     });
 
-    // Zoom UI 設定
+    // --- Thumbnail click handlers ---
+    // Click static thumbnail -> show overlay + miniCam (only two-state toggle)
+    preview.addEventListener('click', (ev) => {
+      if (!overlayPreview.src) return;
+      // If currently MAIN_VIEW -> switch to OVERLAY_VIEW
+      if (viewState === 'MAIN_VIEW') {
+        setOverlayView();
+      } else {
+        // if somehow already in overlay, switch back to main
+        setMainView();
+      }
+      ev.stopPropagation();
+    });
+
+    // Click overlay -> switch back to MAIN_VIEW
+    overlayPreview.addEventListener('click', (ev) => {
+      setMainView();
+      ev.stopPropagation();
+    });
+
+    // --- Mini camera logic (simple live feed in thumbnail area) ---
+    function showMiniCam() {
+      if (!stream) return;
+      try {
+        miniCam.srcObject = stream;
+        miniCam.muted = true;
+        miniCam.play().catch(()=>{});
+        miniCamContainer.style.display = 'block';
+        // hide static thumbnail while miniCam visible
+        preview.style.display = 'none';
+      } catch (err) { console.warn('miniCam start failed', err); }
+    }
+
+    function hideMiniCam(detach = true) {
+      miniCamContainer.style.display = 'none';
+      if (detach) {
+        try { miniCam.srcObject = null; } catch (_) {}
+      }
+      // show static thumbnail image if available
+      if (preview.src) preview.style.display = 'block';
+    }
+
+    // Click miniCam -> ALWAYS switch back to MAIN_VIEW (big camera + small static thumbnail)
+    miniCamContainer.addEventListener('click', (ev) => {
+      if (!preview.src) return;
+      setMainView();
+      ev.stopPropagation();
+    });
+    miniCam.addEventListener('click', (ev) => {
+      // delegate
+      miniCamContainer.click();
+      ev.stopPropagation();
+    });
+
+    // --- Zoom UI / gestures / pan (kept from previous implementation, unchanged) ---
     function setupZoomSlider(min, max, step, initial) {
       zoomSlider.min = min;
       zoomSlider.max = max;
@@ -289,65 +442,134 @@
       zoomControl.style.display = 'flex';
       zoomSlider.oninput = async (e) => {
         const v = parseFloat(e.target.value);
-        zoomFactor = v;
+        const s = { x: 0, y: 0 };
+        await setZoom(v, s);
         zoomValue.textContent = v.toFixed(1) + "x";
-        if (stream && hardwareZoomSupported) {
-          const track = stream.getVideoTracks()[0];
-          try {
-            await track.applyConstraints({ advanced: [{ zoom: v }] });
-            // hardware zoom では見た目の scale は 1 のまま（フレーム自体がズームされる）
-            video.style.transform = 'translate(-50%, -50%) scale(1)';
-          } catch (err) {
-            // 失敗したらソフトウェアズームにフォールバック
-            console.warn('applyConstraints zoom failed, fallback to software zoom', err);
-            applySoftwareVideoZoom(v);
-          }
-        } else {
-          applySoftwareVideoZoom(v);
-        }
       };
     }
-
-    function hideZoomControl() {
-      zoomControl.style.display = 'none';
-      zoomSlider.oninput = null;
-      zoomFactor = 1;
-      zoomValue.textContent = "1.0x";
+    function hideZoomControl() { zoomControl.style.display = 'none'; zoomSlider.oninput = null; zoomFactor = 1; zoomValue.textContent = "1.0x"; }
+    function applyVideoTransform() { video.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px)) scale(${zoomFactor})`; }
+    async function setZoom(newZoom, s) {
+      const oldZoom = zoomFactor || 1;
+      const newPanX = (panX - s.x) * (newZoom / oldZoom) + s.x;
+      const newPanY = (panY - s.y) * (newZoom / oldZoom) + s.y;
+      zoomFactor = newZoom; panX = newPanX; panY = newPanY; clampPan(); applyVideoTransform();
+      if (stream && typeof stream.getVideoTracks === 'function') {
+        const track = stream.getVideoTracks()[0];
+        try { await track.applyConstraints({ advanced: [{ zoom: clamp(zoomFactor, hardwareZoomRange.min, hardwareZoomRange.max) }] }); }
+        catch (err) {}
+      }
+      if (zoomControl.style.display !== 'none') { zoomSlider.value = zoomFactor; zoomValue.textContent = zoomFactor.toFixed(1) + 'x'; }
     }
-
-    // ソフトウェアズーム：video をラッパー内で拡大（見た目だけ）。ラッパーが overflow:hidden のため
-    // 見た目の枠位置・サイズは変わりません（ユーザーの要望に対応）
-    function applySoftwareVideoZoom(v) {
-      // 中心に拡大する（ラッパーが溢れを隠すので周りのUIは隠れない）
-      video.style.transform = `translate(-50%, -50%) scale(${v})`;
+    function clampPan() {
+      const W = video.videoWidth, H = video.videoHeight;
+      if (!W || !H) return;
+      wrapperRect = videoWrapper.getBoundingClientRect();
+      const wrapperW = wrapperRect.width, wrapperH = wrapperRect.height;
+      const scaleToFill = Math.max(wrapperW / W, wrapperH / H);
+      const displayedWidth = W * scaleToFill, displayedHeight = H * scaleToFill;
+      const visualWidth = displayedWidth * zoomFactor, visualHeight = displayedHeight * zoomFactor;
+      const maxPanX = Math.max(0, (visualWidth - wrapperW) / 2), maxPanY = Math.max(0, (visualHeight - wrapperH) / 2);
+      panX = clamp(panX, -maxPanX, maxPanX); panY = clamp(panY, -maxPanY, maxPanY);
     }
+    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
-    function clamp(v, min, max) {
-      return Math.max(min, Math.min(max, v));
-    }
+    // gestures (pinch/pan) - active only when camera is on and in MAIN_VIEW
+    let isPanning = false, isPinching = false, pinchStartDist = 0, pinchStartZoom = 1;
+    let pinchCenter = {x:0,y:0}, startPanX = 0, startPanY = 0, panStart = {x:0,y:0};
+    function getTouchDist(t1,t2){const dx=t2.clientX-t1.clientX,dy=t2.clientY-t1.clientY;return Math.hypot(dx,dy);}
+    function getTouchMid(t1,t2){return {x:(t1.clientX+t2.clientX)/2,y:(t1.clientY+t2.clientY)/2};}
 
-    // 画像前処理（モデル用）
+    videoWrapper.addEventListener('touchstart', (ev) => {
+      if (!isCameraOn) return;
+      // Only allow gestures when in MAIN_VIEW (we don't want gestures while overlay is on)
+      if (viewState !== 'MAIN_VIEW') return;
+      ev.preventDefault();
+      wrapperRect = videoWrapper.getBoundingClientRect();
+      if (ev.touches.length === 1) {
+        isPanning = true; isPinching = false;
+        startPanX = panX; startPanY = panY;
+        panStart = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
+      } else if (ev.touches.length === 2) {
+        isPinching = true; isPanning = false;
+        pinchStartDist = getTouchDist(ev.touches[0], ev.touches[1]);
+        pinchStartZoom = zoomFactor || 1;
+        const mid = getTouchMid(ev.touches[0], ev.touches[1]);
+        pinchCenter = { x: mid.x - wrapperRect.left - wrapperRect.width / 2, y: mid.y - wrapperRect.top - wrapperRect.height / 2 };
+        panStart = { x: panX, y: panY };
+      }
+    }, { passive: false });
+
+    videoWrapper.addEventListener('touchmove', (ev) => {
+      if (!isCameraOn) return;
+      if (viewState !== 'MAIN_VIEW') return;
+      ev.preventDefault();
+      wrapperRect = videoWrapper.getBoundingClientRect();
+      if (isPinching && ev.touches.length >= 2) {
+        const dist = getTouchDist(ev.touches[0], ev.touches[1]);
+        if (pinchStartDist <= 0) return;
+        let scale = dist / pinchStartDist;
+        let newZoom = pinchStartZoom * scale;
+        const minZoom = parseFloat(zoomSlider.min || 1), maxZoom = parseFloat(zoomSlider.max || 3);
+        newZoom = clamp(newZoom, minZoom, maxZoom);
+        const s = { x: pinchCenter.x, y: pinchCenter.y };
+        panX = (panStart.x - s.x) * (newZoom / pinchStartZoom) + s.x;
+        panY = (panStart.y - s.y) * (newZoom / pinchStartZoom) + s.y;
+        zoomFactor = newZoom; clampPan(); applyVideoTransform();
+        if (zoomControl.style.display !== 'none') { zoomSlider.value = zoomFactor; zoomValue.textContent = zoomFactor.toFixed(1) + 'x'; }
+      } else if (isPanning && ev.touches.length === 1) {
+        const dx = ev.touches[0].clientX - panStart.x;
+        const dy = ev.touches[0].clientY - panStart.y;
+        panX = startPanX + dx; panY = startPanY + dy; clampPan(); applyVideoTransform();
+      }
+    }, { passive: false });
+
+    videoWrapper.addEventListener('touchend', (ev) => {
+      if (!isCameraOn) return;
+      if (viewState !== 'MAIN_VIEW') return;
+      ev.preventDefault();
+      if (ev.touches.length === 0) { isPanning = false; isPinching = false; }
+      else if (ev.touches.length === 1) {
+        isPinching = false; isPanning = true;
+        startPanX = panX; startPanY = panY; panStart = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
+      }
+    }, { passive: false });
+
+    // mouse drag & wheel only active in MAIN_VIEW
+    let isMouseDown = false, mouseStart = {x:0,y:0};
+    videoWrapper.addEventListener('mousedown', (ev) => {
+      if (!isCameraOn) return; if (viewState !== 'MAIN_VIEW') return;
+      ev.preventDefault(); isMouseDown = true; mouseStart = { x: ev.clientX, y: ev.clientY }; startPanX = panX; startPanY = panY;
+    });
+    window.addEventListener('mousemove', (ev) => {
+      if (!isCameraOn) return; if (viewState !== 'MAIN_VIEW') return;
+      if (!isMouseDown) return;
+      const dx = ev.clientX - mouseStart.x, dy = ev.clientY - mouseStart.y;
+      panX = startPanX + dx; panY = startPanY + dy; clampPan(); applyVideoTransform();
+    });
+    window.addEventListener('mouseup', () => { if (!isCameraOn) return; isMouseDown = false; });
+
+    videoWrapper.addEventListener('wheel', (ev) => {
+      if (!isCameraOn) return; if (viewState !== 'MAIN_VIEW') return;
+      ev.preventDefault();
+      const delta = -ev.deltaY; const zoomChange = delta > 0 ? 1.05 : 0.95;
+      const newZoom = clamp(zoomFactor * zoomChange, parseFloat(zoomSlider.min || 1), parseFloat(zoomSlider.max || 3));
+      wrapperRect = videoWrapper.getBoundingClientRect();
+      const s = { x: ev.clientX - wrapperRect.left - wrapperRect.width/2, y: ev.clientY - wrapperRect.top - wrapperRect.height/2 };
+      setZoom(newZoom, s);
+    }, { passive: false });
+
+    // --- Model preprocessing & predict (unchanged) ---
     function preprocessImage(img, size=224) {
-      const canvas = document.createElement('canvas');
-      canvas.width = size;
-      canvas.height = size;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, size, size);
-      let tensor = tf.browser.fromPixels(canvas)
-        .expandDims(0)
-        .toFloat()
-        .div(tf.scalar(255));
+      const canvas = document.createElement('canvas'); canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, size, size);
+      let tensor = tf.browser.fromPixels(canvas).expandDims(0).toFloat().div(tf.scalar(255));
       return tensor;
     }
-
-    // 判定
     document.getElementById('sakuraForm').addEventListener('submit', async function(e) {
       e.preventDefault();
       const resultDiv = document.getElementById('result');
-      if (!inputImage || !model) {
-        resultDiv.innerHTML = "画像とモデルを確認してください。";
-        return;
-      }
+      if (!inputImage || !model) { resultDiv.innerHTML = "画像とモデルを確認してください。"; return; }
       resultDiv.textContent = "判定中...";
       inputImage.onload = async () => {
         try {
@@ -356,32 +578,19 @@
             if (model.inputs && model.inputs[0] && model.inputs[0].shape) {
               const s = model.inputs[0].shape;
               if (s.length >= 3 && s[1] && s[2]) {
-                if (s[1] === s[2]) inputSize = s[1];
-                else inputSize = Math.max(s[1], s[2]);
+                if (s[1] === s[2]) inputSize = s[1]; else inputSize = Math.max(s[1], s[2]);
               }
             }
           } catch (_) {}
           const tensor = preprocessImage(inputImage, inputSize);
           const predictionTensor = model.predict(tensor);
           let prediction;
-          if (Array.isArray(predictionTensor)) {
-            prediction = await predictionTensor[0].data();
-          } else {
-            prediction = await predictionTensor.data();
-          }
-          let idx = 0;
-          for (let i = 1; i < prediction.length; i++) {
-            if (prediction[i] > prediction[idx]) idx = i;
-          }
-          const prob = (prediction[idx] * 100).toFixed(1);
-          const label = classes[idx] || `クラス${idx+1}`;
-          if (label.includes("健康") || label.toLowerCase().includes("healthy")) {
-            resultDiv.innerHTML = `<span class="healthy">✅ ${label}です！ (${prob}%)</span>`;
-          } else if (label.includes("病気") || label.toLowerCase().includes("sick")) {
-            resultDiv.innerHTML = `<span class="sick">⚠️ ${label}の可能性があります (${prob}%)</span>`;
-          } else {
-            resultDiv.innerHTML = `<span>${label} (${prob}%)</span>`;
-          }
+          if (Array.isArray(predictionTensor)) prediction = await predictionTensor[0].data(); else prediction = await predictionTensor.data();
+          let idx = 0; for (let i = 1; i < prediction.length; i++) if (prediction[i] > prediction[idx]) idx = i;
+          const prob = (prediction[idx] * 100).toFixed(1); const label = classes[idx] || `クラス${idx+1}`;
+          if (label.includes("健康") || label.toLowerCase().includes("healthy")) resultDiv.innerHTML = `<span class="healthy">✅ ${label}です！ (${prob}%)</span>`;
+          else if (label.includes("病気") || label.toLowerCase().includes("sick")) resultDiv.innerHTML = `<span class="sick">⚠️ ${label}の可能性があります (${prob}%)</span>`;
+          else resultDiv.innerHTML = `<span>${label} (${prob}%)</span>`;
         } catch (err) {
           console.error(err);
           resultDiv.innerHTML = "判定に失敗しました。画像やモデルの形式を確認してください。";
@@ -390,10 +599,11 @@
       if (inputImage.complete) inputImage.onload();
     });
 
-    // ページ離脱でカメラ解放
-    window.addEventListener('beforeunload', () => {
-      if (stream) stream.getTracks().forEach(t => t.stop());
-    });
+    // resize handling
+    window.addEventListener('resize', () => { clampPan(); applyVideoTransform(); });
+
+    // cleanup
+    window.addEventListener('beforeunload', () => { if (stream) stream.getTracks().forEach(t => t.stop()); });
   </script>
 </body>
 </html>
