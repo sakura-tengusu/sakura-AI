@@ -97,6 +97,12 @@
     .zoom-control { margin-top: 0.6em; display: none; align-items: center; gap: 0.6em; }
     .zoom-control input[type="range"] { width: 100%; }
     .zoom-value { min-width: 48px; text-align: right; font-size: 0.95em; color: #444; }
+
+    /* brightness control: placed under zoom-control */
+    .brightness-control { margin-top: 0.4em; display: none; align-items: center; gap: 0.6em; }
+    .brightness-control input[type="range"] { width: 100%; }
+    .brightness-value { min-width: 56px; text-align: right; font-size: 0.95em; color: #444; }
+
     .small-note { font-size: 0.85em; color: #666; margin-top:0.5em; text-align:center; }
     .muted { color:#888; font-size:0.9em; margin-top:0.5em; text-align:center; }
   </style>
@@ -127,6 +133,13 @@
       <div id="zoomControl" class="zoom-control">
         <input id="zoomSlider" type="range" min="1" max="1" step="0.1" value="1" />
         <div id="zoomValue" class="zoom-value">1.0x</div>
+      </div>
+
+      <!-- Brightness control (added under zoom) -->
+      <div id="brightnessControl" class="brightness-control" title="明るさを調整します。中央が0（変化なし）">
+        <!-- Range is -1 .. 1, 0 is neutral -->
+        <input id="brightnessSlider" type="range" min="-1" max="1" step="0.01" value="0" />
+        <div id="brightnessValue" class="brightness-value">0.00</div>
       </div>
 
       <!-- thumbnail preview shown after capture; clicking toggles overlay <-> camera -->
@@ -180,6 +193,10 @@
     const zoomSlider = document.getElementById('zoomSlider');
     const zoomValue = document.getElementById('zoomValue');
 
+    const brightnessControl = document.getElementById('brightnessControl');
+    const brightnessSlider = document.getElementById('brightnessSlider');
+    const brightnessValue = document.getElementById('brightnessValue');
+
     const miniCamContainer = document.getElementById('miniCamContainer');
     const miniCam = document.getElementById('miniCam');
 
@@ -191,6 +208,7 @@
     let hardwareZoomSupported = false;
     let hardwareZoomRange = {min:1, max:1, step:0.1};
     let zoomFactor = 1;
+    let brightnessFactor = 0; // -1 .. 1, 0 = neutral
     let panX = 0, panY = 0;
     let wrapperRect = null;
 
@@ -310,6 +328,9 @@
         video.style.transform = `translate(-50%,-50%) scale(1)`;
       }
 
+      // show brightness control (initial 0 = neutral)
+      setupBrightnessSlider(-1, 1, 0.01, 0);
+
       // ensure state is MAIN_VIEW when camera starts
       setMainView();
     }
@@ -324,7 +345,10 @@
       toggleCameraBtn.textContent = "カメラ起動";
       isCameraOn = false;
       hideZoomControl();
-      zoomFactor = 1; panX = 0; panY = 0; applyVideoTransform();
+      hideBrightnessControl();
+      zoomFactor = 1; brightnessFactor = 0; panX = 0; panY = 0; applyVideoTransform();
+      // clear any filters
+      applyBrightness();
       videoWrapper.style.touchAction = '';
       // when camera off, go to MAIN_VIEW visually (overlay hidden, no miniCam)
       setMainView();
@@ -364,13 +388,24 @@
       const size = Math.min(cropWsrc, cropHsrc);
       canvas.width = size; canvas.height = size;
       const ctx = canvas.getContext('2d');
-      try { ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size); }
-      catch (err) { console.warn('drawImage failed', err); ctx.drawImage(video, 0, 0, canvas.width, canvas.height); }
+
+      // Apply brightness to captured image so the saved preview matches what the user sees
+      const cssBrightnessMultiplier = 1 + brightnessFactor;
+      try {
+        // use canvas filter so drawImage includes brightness
+        ctx.filter = `brightness(${cssBrightnessMultiplier})`;
+        ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+      }
+      catch (err) { console.warn('drawImage failed', err); ctx.filter = 'none'; ctx.drawImage(video, 0, 0, canvas.width, canvas.height); }
       const dataUrl = canvas.toDataURL('image/png');
 
       // Set both static preview and overlay source
       preview.src = dataUrl;
       overlayPreview.src = dataUrl;
+      // apply the same visual filter to the preview/overlay so they look consistent
+      preview.style.filter = `brightness(${cssBrightnessMultiplier})`;
+      overlayPreview.style.filter = `brightness(${cssBrightnessMultiplier})`;
+
       previewThumb.style.display = 'flex';
       inputImage = new Image(); inputImage.crossOrigin = "anonymous"; inputImage.src = dataUrl;
 
@@ -404,6 +439,8 @@
       try {
         miniCam.srcObject = stream;
         miniCam.muted = true;
+        // apply same brightness visually to miniCam
+        miniCam.style.filter = `brightness(${1 + brightnessFactor})`;
         miniCam.play().catch(()=>{});
         miniCamContainer.style.display = 'block';
         // hide static thumbnail while miniCam visible
@@ -448,7 +485,47 @@
       };
     }
     function hideZoomControl() { zoomControl.style.display = 'none'; zoomSlider.oninput = null; zoomFactor = 1; zoomValue.textContent = "1.0x"; }
+
+    // --- Brightness control setup and handlers ---
+    function setupBrightnessSlider(min, max, step, initial) {
+      brightnessSlider.min = min;
+      brightnessSlider.max = max;
+      brightnessSlider.step = step;
+      brightnessSlider.value = initial;
+      brightnessValue.textContent = parseFloat(initial).toFixed(2);
+      brightnessControl.style.display = 'flex';
+
+      brightnessSlider.oninput = (e) => {
+        const v = parseFloat(e.target.value);
+        brightnessFactor = v;
+        // show signed value for clarity
+        brightnessValue.textContent = (v >= 0 ? "+" : "") + v.toFixed(2);
+        applyBrightness();
+      };
+      // set initial value
+      brightnessFactor = parseFloat(initial);
+      applyBrightness();
+    }
+
+    function hideBrightnessControl() {
+      brightnessControl.style.display = 'none';
+      brightnessSlider.oninput = null;
+      brightnessFactor = 0;
+      brightnessValue.textContent = "0.00";
+    }
+
+    function applyBrightness() {
+      const cssVal = 1 + (brightnessFactor || 0); // map -1..1 -> 0..2 where 1 is neutral
+      // apply to live video and miniCam; preview/overlay are static images but we also set their style so UI looks consistent
+      video.style.filter = `brightness(${cssVal})`;
+      miniCam.style.filter = `brightness(${cssVal})`;
+      // only visually tint previews if they exist (we also set canvas draw filter on capture)
+      if (preview.src) preview.style.filter = `brightness(${cssVal})`;
+      if (overlayPreview.src) overlayPreview.style.filter = `brightness(${cssVal})`;
+    }
+
     function applyVideoTransform() { video.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px)) scale(${zoomFactor})`; }
+
     async function setZoom(newZoom, s) {
       const oldZoom = zoomFactor || 1;
       const newPanX = (panX - s.x) * (newZoom / oldZoom) + s.x;
