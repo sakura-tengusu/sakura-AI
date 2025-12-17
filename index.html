@@ -248,6 +248,12 @@
         fr.onload = function(e) {
           preview.src = e.target.result;
           overlayPreview.src = e.target.result;
+          // uploaded images should be shown as-is (not affected by current live brightness changes)
+          preview.removeAttribute('data-captured');
+          overlayPreview.removeAttribute('data-captured');
+          preview.style.filter = 'none';
+          overlayPreview.style.filter = 'none';
+
           previewThumb.style.display = 'flex';
           // after a new static image is loaded, default to MAIN_VIEW
           setMainView();
@@ -347,8 +353,9 @@
       hideZoomControl();
       hideBrightnessControl();
       zoomFactor = 1; brightnessFactor = 0; panX = 0; panY = 0; applyVideoTransform();
-      // clear any filters
-      applyBrightness();
+      // clear any filters on live video/miniCam
+      video.style.filter = '';
+      miniCam.style.filter = '';
       videoWrapper.style.touchAction = '';
       // when camera off, go to MAIN_VIEW visually (overlay hidden, no miniCam)
       setMainView();
@@ -389,22 +396,28 @@
       canvas.width = size; canvas.height = size;
       const ctx = canvas.getContext('2d');
 
-      // Apply brightness to captured image so the saved preview matches what the user sees
+      // Apply brightness to captured image so the saved preview matches what the user sees AT THE MOMENT OF CAPTURE.
+      // After capture, the preview/overlay image is a baked image and will NOT change when the brightness slider is adjusted.
       const cssBrightnessMultiplier = 1 + brightnessFactor;
       try {
-        // use canvas filter so drawImage includes brightness
+        // use canvas filter so drawImage includes brightness (baked into the image)
         ctx.filter = `brightness(${cssBrightnessMultiplier})`;
         ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
       }
       catch (err) { console.warn('drawImage failed', err); ctx.filter = 'none'; ctx.drawImage(video, 0, 0, canvas.width, canvas.height); }
       const dataUrl = canvas.toDataURL('image/png');
 
-      // Set both static preview and overlay source
+      // Set both static preview and overlay source with the baked image.
       preview.src = dataUrl;
       overlayPreview.src = dataUrl;
-      // apply the same visual filter to the preview/overlay so they look consistent
-      preview.style.filter = `brightness(${cssBrightnessMultiplier})`;
-      overlayPreview.style.filter = `brightness(${cssBrightnessMultiplier})`;
+
+      // Mark these as captured so we do NOT modify their visual brightness later.
+      preview.setAttribute('data-captured', 'true');
+      overlayPreview.setAttribute('data-captured', 'true');
+
+      // Ensure no CSS filter is applied to the preview/overlay so they display the baked pixels unchanged.
+      preview.style.filter = 'none';
+      overlayPreview.style.filter = 'none';
 
       previewThumb.style.display = 'flex';
       inputImage = new Image(); inputImage.crossOrigin = "anonymous"; inputImage.src = dataUrl;
@@ -439,7 +452,7 @@
       try {
         miniCam.srcObject = stream;
         miniCam.muted = true;
-        // apply same brightness visually to miniCam
+        // apply same brightness visually to miniCam (live)
         miniCam.style.filter = `brightness(${1 + brightnessFactor})`;
         miniCam.play().catch(()=>{});
         miniCamContainer.style.display = 'block';
@@ -516,12 +529,10 @@
 
     function applyBrightness() {
       const cssVal = 1 + (brightnessFactor || 0); // map -1..1 -> 0..2 where 1 is neutral
-      // apply to live video and miniCam; preview/overlay are static images but we also set their style so UI looks consistent
+      // apply to live video and miniCam only. Do NOT change preview/overlay, because captured images are baked and must remain unchanged.
       video.style.filter = `brightness(${cssVal})`;
       miniCam.style.filter = `brightness(${cssVal})`;
-      // only visually tint previews if they exist (we also set canvas draw filter on capture)
-      if (preview.src) preview.style.filter = `brightness(${cssVal})`;
-      if (overlayPreview.src) overlayPreview.style.filter = `brightness(${cssVal})`;
+      // uploaded or captured previews retain their baked pixels; we do not modify preview/overlay styles here.
     }
 
     function applyVideoTransform() { video.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px)) scale(${zoomFactor})`; }
