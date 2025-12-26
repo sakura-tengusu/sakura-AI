@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <title>てんぐすん。</title>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.16.0/dist/tf.min.js"></script>
+  <!-- piexifjs: JPEGにEXIFを埋め込むため -->
+  <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.min.js"></script>
+
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     body { font-family: sans-serif; background: #f2f2f2; padding: 2em; }
@@ -65,6 +68,7 @@
       display: flex;
       gap: 0.6em;
       align-items: center;
+      justify-content: flex-start;
     }
     .preview-thumb img {
       width: 80px;
@@ -102,6 +106,19 @@
     .brightness-control { margin-top: 0.4em; display: none; align-items: center; gap: 0.6em; }
     .brightness-control input[type="range"] { width: 100%; }
     .brightness-value { min-width: 56px; text-align: right; font-size: 0.95em; color: #444; }
+
+    /* download button style */
+    #downloadBtn {
+      margin-left: auto;
+      padding: 0.45em 0.6em;
+      background: #4a90e2;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9em;
+    }
+    #downloadBtn[disabled] { opacity: 0.5; cursor: default; background: #9fbce9; }
 
     .small-note { font-size: 0.85em; color: #666; margin-top:0.5em; text-align:center; }
     .muted { color:#888; font-size:0.9em; margin-top:0.5em; text-align:center; }
@@ -149,7 +166,11 @@
         <div class="mini-camera" id="miniCamContainer" title="ミニカメラ（タップでサムネイル/カメラ切替）">
           <video id="miniCam" autoplay playsinline muted></video>
         </div>
+
         <div class="txt">撮影済み（タップで確認/カメラ切替）</div>
+
+        <!-- ダウンロードボタン（撮った画像があるときに有効化） -->
+        <button type="button" id="downloadBtn" disabled title="撮った画像をダウンロード">ダウンロード</button>
       </div>
 
       <button type="submit">AIで判定</button>
@@ -200,6 +221,8 @@
     const miniCamContainer = document.getElementById('miniCamContainer');
     const miniCam = document.getElementById('miniCam');
 
+    const downloadBtn = document.getElementById('downloadBtn');
+
     // --- 状態 ---
     let inputImage = null;
     let stream = null;
@@ -212,6 +235,11 @@
     let panX = 0, panY = 0;
     let wrapperRect = null;
 
+    // store the latest captured image (JPEG dataURL with EXIF if available)
+    let lastCapturedDataUrl = null;
+    // store capture metadata (timestamp, coords) for filename or any other use
+    let lastCaptureMeta = null;
+
     // Two allowed states:
     // MAIN_VIEW: big camera (video shown) + small static thumbnail (preview shown, miniCam hidden)
     // OVERLAY_VIEW: big static image (overlayPreview visible) + small live miniCam (miniCamContainer shown, preview hidden)
@@ -219,11 +247,10 @@
 
     // --- Helper functions to enforce strict two-state toggle ---
     function setMainView() {
-      // show main camera, show static thumbnail if exists, hide overlay and miniCam
       viewState = 'MAIN_VIEW';
       overlayPreview.style.display = 'none';
       if (isCameraOn) video.style.display = 'block';
-      hideMiniCam(false); // hide miniCam but keep static thumbnail visible if present
+      hideMiniCam(false);
       if (preview.src) {
         previewThumb.style.display = 'flex';
         preview.style.display = 'block';
@@ -231,13 +258,10 @@
     }
 
     function setOverlayView() {
-      // show big static image overlay and show miniCam in thumbnail area, hide main video
-      if (!overlayPreview.src) return; // nothing to show
+      if (!overlayPreview.src) return;
       viewState = 'OVERLAY_VIEW';
       overlayPreview.style.display = 'block';
-      // hide main video visually but do not stop the stream
       video.style.display = 'none';
-      // show miniCam and hide static thumbnail image
       showMiniCam();
     }
 
@@ -248,18 +272,20 @@
         fr.onload = function(e) {
           preview.src = e.target.result;
           overlayPreview.src = e.target.result;
-          // uploaded images should be shown as-is (not affected by current live brightness changes)
+          // uploaded images should be shown as-is (not affected by live brightness slider)
           preview.removeAttribute('data-captured');
           overlayPreview.removeAttribute('data-captured');
           preview.style.filter = 'none';
           overlayPreview.style.filter = 'none';
-
           previewThumb.style.display = 'flex';
-          // after a new static image is loaded, default to MAIN_VIEW
           setMainView();
           inputImage = new Image();
           inputImage.crossOrigin = "anonymous";
           inputImage.src = e.target.result;
+          // disable download button for uploaded image (only enable for captured)
+          downloadBtn.disabled = true;
+          lastCapturedDataUrl = null;
+          lastCaptureMeta = null;
         };
         fr.readAsDataURL(this.files[0]);
       } else {
@@ -308,7 +334,7 @@
       zoomFactor = 1; panX = 0; panY = 0; applyVideoTransform();
       overlayPreview.style.display = 'none';
 
-      // capabilities check for zoom (same as before)
+      // capabilities check for zoom
       const track = stream.getVideoTracks()[0];
       hardwareZoomSupported = false;
       try {
@@ -353,11 +379,9 @@
       hideZoomControl();
       hideBrightnessControl();
       zoomFactor = 1; brightnessFactor = 0; panX = 0; panY = 0; applyVideoTransform();
-      // clear any filters on live video/miniCam
       video.style.filter = '';
       miniCam.style.filter = '';
       videoWrapper.style.touchAction = '';
-      // when camera off, go to MAIN_VIEW visually (overlay hidden, no miniCam)
       setMainView();
     }
 
@@ -371,11 +395,48 @@
       } finally { switchCameraBtn.disabled = false; }
     });
 
-    // capture: keep camera running and remain in MAIN_VIEW (big camera + small static thumb)
-    captureBtn.addEventListener('click', () => {
+    // --- Helper: GPS and EXIF utilities ---
+    function toExifDateString(d) {
+      // "YYYY:MM:DD HH:MM:SS"
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}:${pad(d.getMonth()+1)}:${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+    function decimalToDMSRational(dec) {
+      // return array of three rationals [[deg,1],[min,1],[secNum,secDen]]
+      dec = Math.abs(dec);
+      const deg = Math.floor(dec);
+      const minf = (dec - deg) * 60;
+      const minutes = Math.floor(minf);
+      const sec = (minf - minutes) * 60;
+      // use seconds with denominator 100 to keep integer
+      const secNum = Math.round(sec * 100);
+      const secDen = 100;
+      return [[deg,1],[minutes,1],[secNum,secDen]];
+    }
+
+    // --- Capture: bake brightness into image and embed EXIF (date + optional GPS) ---
+    captureBtn.addEventListener('click', async () => {
       if (!stream) return;
       const W = video.videoWidth; const H = video.videoHeight;
       if (!W || !H) return;
+
+      // record capture metadata
+      const captureTime = new Date();
+      lastCaptureMeta = { capturedAt: captureTime, coords: null };
+
+      // attempt to get geolocation but don't block too long (timeout 3000ms)
+      const getPosition = () => new Promise((resolve) => {
+        if (!navigator.geolocation) return resolve(null);
+        let resolved = false;
+        const success = (pos) => { if (!resolved) { resolved = true; resolve(pos.coords); } };
+        const fail = () => { if (!resolved) { resolved = true; resolve(null); } };
+        navigator.geolocation.getCurrentPosition(success, fail, { enableHighAccuracy: true, timeout: 3000, maximumAge: 60000 });
+        // fallback timeout safety (in case getCurrentPosition never responds)
+        setTimeout(() => { if (!resolved) { resolved = true; resolve(null); } }, 3500);
+      });
+
+      const positionPromise = getPosition();
+
       wrapperRect = videoWrapper.getBoundingClientRect();
       const wrapperW = Math.round(wrapperRect.width);
       const wrapperH = Math.round(wrapperRect.height);
@@ -396,20 +457,59 @@
       canvas.width = size; canvas.height = size;
       const ctx = canvas.getContext('2d');
 
-      // Apply brightness to captured image so the saved preview matches what the user sees AT THE MOMENT OF CAPTURE.
-      // After capture, the preview/overlay image is a baked image and will NOT change when the brightness slider is adjusted.
+      // Bake brightness into the image (so captured image visually matches what the user saw)
       const cssBrightnessMultiplier = 1 + brightnessFactor;
       try {
-        // use canvas filter so drawImage includes brightness (baked into the image)
         ctx.filter = `brightness(${cssBrightnessMultiplier})`;
         ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
       }
-      catch (err) { console.warn('drawImage failed', err); ctx.filter = 'none'; ctx.drawImage(video, 0, 0, canvas.width, canvas.height); }
-      const dataUrl = canvas.toDataURL('image/png');
+      catch (err) {
+        console.warn('drawImage failed', err);
+        ctx.filter = 'none';
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      }
 
-      // Set both static preview and overlay source with the baked image.
-      preview.src = dataUrl;
-      overlayPreview.src = dataUrl;
+      // produce JPEG (EXIF is for JPEG)
+      const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+
+      // wait for position (but not longer than the internal timeout)
+      const coords = await positionPromise;
+      if (coords) lastCaptureMeta.coords = { latitude: coords.latitude, longitude: coords.longitude, altitude: coords.altitude };
+
+      // Build EXIF with piexif (DateTimeOriginal + GPS if available)
+      try {
+        const exifObj = { "0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": null };
+        const dateStr = toExifDateString(captureTime);
+        // Image DateTime (0th) and Exif DateTimeOriginal
+        exifObj["0th"][piexif.ImageIFD.DateTime] = dateStr;
+        exifObj["Exif"][piexif.ExifIFD.DateTimeOriginal] = dateStr;
+        // If GPS available, set GPS tags
+        if (coords) {
+          const latRef = coords.latitude >= 0 ? "N" : "S";
+          const lonRef = coords.longitude >= 0 ? "E" : "W";
+          exifObj["GPS"][piexif.GPSIFD.GPSLatitudeRef] = latRef;
+          exifObj["GPS"][piexif.GPSIFD.GPSLongitudeRef] = lonRef;
+          exifObj["GPS"][piexif.GPSIFD.GPSLatitude] = decimalToDMSRational(coords.latitude);
+          exifObj["GPS"][piexif.GPSIFD.GPSLongitude] = decimalToDMSRational(coords.longitude);
+          if (typeof coords.altitude === 'number' && !isNaN(coords.altitude)) {
+            // altitude rational: altitude * 100 / 100
+            const altNum = Math.round(Math.abs(coords.altitude) * 100);
+            exifObj["GPS"][piexif.GPSIFD.GPSAltitude] = [altNum, 100];
+            exifObj["GPS"][piexif.GPSIFD.GPSAltitudeRef] = coords.altitude >= 0 ? 0 : 1;
+          }
+        }
+        const exifbytes = piexif.dump(exifObj);
+        const newDataUrl = piexif.insert(exifbytes, jpegDataUrl);
+        lastCapturedDataUrl = newDataUrl;
+      } catch (exifErr) {
+        console.warn('EXIF埋め込み失敗', exifErr);
+        // fallback to raw jpeg
+        lastCapturedDataUrl = jpegDataUrl;
+      }
+
+      // Set both static preview and overlay source with the baked image (JPEG with EXIF if available)
+      preview.src = lastCapturedDataUrl;
+      overlayPreview.src = lastCapturedDataUrl;
 
       // Mark these as captured so we do NOT modify their visual brightness later.
       preview.setAttribute('data-captured', 'true');
@@ -420,31 +520,22 @@
       overlayPreview.style.filter = 'none';
 
       previewThumb.style.display = 'flex';
-      inputImage = new Image(); inputImage.crossOrigin = "anonymous"; inputImage.src = dataUrl;
+      inputImage = new Image(); inputImage.crossOrigin = "anonymous"; inputImage.src = lastCapturedDataUrl;
+
+      // enable download button
+      downloadBtn.disabled = false;
 
       // IMPORTANT: after capture we MUST stay in MAIN_VIEW (big camera + small static thumbnail)
       setMainView();
     });
 
     // --- Thumbnail click handlers ---
-    // Click static thumbnail -> show overlay + miniCam (only two-state toggle)
     preview.addEventListener('click', (ev) => {
       if (!overlayPreview.src) return;
-      // If currently MAIN_VIEW -> switch to OVERLAY_VIEW
-      if (viewState === 'MAIN_VIEW') {
-        setOverlayView();
-      } else {
-        // if somehow already in overlay, switch back to main
-        setMainView();
-      }
+      if (viewState === 'MAIN_VIEW') setOverlayView(); else setMainView();
       ev.stopPropagation();
     });
-
-    // Click overlay -> switch back to MAIN_VIEW
-    overlayPreview.addEventListener('click', (ev) => {
-      setMainView();
-      ev.stopPropagation();
-    });
+    overlayPreview.addEventListener('click', (ev) => { setMainView(); ev.stopPropagation(); });
 
     // --- Mini camera logic (simple live feed in thumbnail area) ---
     function showMiniCam() {
@@ -452,34 +543,37 @@
       try {
         miniCam.srcObject = stream;
         miniCam.muted = true;
-        // apply same brightness visually to miniCam (live)
         miniCam.style.filter = `brightness(${1 + brightnessFactor})`;
         miniCam.play().catch(()=>{});
         miniCamContainer.style.display = 'block';
-        // hide static thumbnail while miniCam visible
         preview.style.display = 'none';
       } catch (err) { console.warn('miniCam start failed', err); }
     }
-
     function hideMiniCam(detach = true) {
       miniCamContainer.style.display = 'none';
-      if (detach) {
-        try { miniCam.srcObject = null; } catch (_) {}
-      }
-      // show static thumbnail image if available
+      if (detach) { try { miniCam.srcObject = null; } catch (_) {} }
       if (preview.src) preview.style.display = 'block';
     }
+    miniCamContainer.addEventListener('click', (ev) => { if (!preview.src) return; setMainView(); ev.stopPropagation(); });
+    miniCam.addEventListener('click', (ev) => { miniCamContainer.click(); ev.stopPropagation(); });
 
-    // Click miniCam -> ALWAYS switch back to MAIN_VIEW (big camera + small static thumbnail)
-    miniCamContainer.addEventListener('click', (ev) => {
-      if (!preview.src) return;
-      setMainView();
-      ev.stopPropagation();
-    });
-    miniCam.addEventListener('click', (ev) => {
-      // delegate
-      miniCamContainer.click();
-      ev.stopPropagation();
+    // --- Download button handler ---
+    downloadBtn.addEventListener('click', (ev) => {
+      if (!lastCapturedDataUrl) return;
+      // filename includes capture datetime if available
+      let filename = 'sakura.jpg';
+      if (lastCaptureMeta && lastCaptureMeta.capturedAt) {
+        const d = lastCaptureMeta.capturedAt;
+        const pad = (n)=>String(n).padStart(2,'0');
+        filename = `sakura_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.jpg`;
+      }
+      // create temporary link and click
+      const a = document.createElement('a');
+      a.href = lastCapturedDataUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     });
 
     // --- Zoom UI / gestures / pan (kept from previous implementation, unchanged) ---
@@ -511,11 +605,9 @@
       brightnessSlider.oninput = (e) => {
         const v = parseFloat(e.target.value);
         brightnessFactor = v;
-        // show signed value for clarity
         brightnessValue.textContent = (v >= 0 ? "+" : "") + v.toFixed(2);
         applyBrightness();
       };
-      // set initial value
       brightnessFactor = parseFloat(initial);
       applyBrightness();
     }
@@ -528,11 +620,10 @@
     }
 
     function applyBrightness() {
-      const cssVal = 1 + (brightnessFactor || 0); // map -1..1 -> 0..2 where 1 is neutral
-      // apply to live video and miniCam only. Do NOT change preview/overlay, because captured images are baked and must remain unchanged.
+      const cssVal = 1 + (brightnessFactor || 0);
+      // apply only to live video and miniCam; do NOT change saved preview/overlay images
       video.style.filter = `brightness(${cssVal})`;
       miniCam.style.filter = `brightness(${cssVal})`;
-      // uploaded or captured previews retain their baked pixels; we do not modify preview/overlay styles here.
     }
 
     function applyVideoTransform() { video.style.transform = `translate(calc(-50% + ${panX}px), calc(-50% + ${panY}px)) scale(${zoomFactor})`; }
@@ -562,7 +653,7 @@
     }
     function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
-    // gestures (pinch/pan) - active only when camera is on and in MAIN_VIEW
+    // gestures (pinch/pan)
     let isPanning = false, isPinching = false, pinchStartDist = 0, pinchStartZoom = 1;
     let pinchCenter = {x:0,y:0}, startPanX = 0, startPanY = 0, panStart = {x:0,y:0};
     function getTouchDist(t1,t2){const dx=t2.clientX-t1.clientX,dy=t2.clientY-t1.clientY;return Math.hypot(dx,dy);}
@@ -570,7 +661,6 @@
 
     videoWrapper.addEventListener('touchstart', (ev) => {
       if (!isCameraOn) return;
-      // Only allow gestures when in MAIN_VIEW (we don't want gestures while overlay is on)
       if (viewState !== 'MAIN_VIEW') return;
       ev.preventDefault();
       wrapperRect = videoWrapper.getBoundingClientRect();
@@ -692,6 +782,7 @@
 
     // cleanup
     window.addEventListener('beforeunload', () => { if (stream) stream.getTracks().forEach(t => t.stop()); });
+
   </script>
 </body>
 </html>
