@@ -185,7 +185,9 @@
     let model = null;
     let classes = ["健康", "病気"];
     const modelStatus = document.getElementById('modelStatus');
+     //ここにURLを挿入▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
     const modelJsonUrl = "https://teachablemachine.withgoogle.com/models/k3U5df8h9/model.json";
+     //▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
     async function loadModelFromUrl(modelUrl) {
       modelStatus.textContent = "モデルを読み込み中...";
       try {
